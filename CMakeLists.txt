@@ -21,6 +21,8 @@ else()
   message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++17 support. Please use a different C++ compiler.")
 endif()
 
+include(FetchContent)
+
 set(EIGEN_VERSION 3.3)
 find_package(Eigen3 ${EIGEN_VERSION} QUIET)
 if(NOT EIGEN3_FOUND)
@@ -53,18 +55,30 @@ if(BUILD_BYTETRACK_TEST)
 
   find_package(GTest QUIET)
   if(NOT GTest_FOUND)
-    message(FATAL_ERROR "GTest not found.")
+    FetchContent_Declare(googletest
+      GIT_REPOSITORY https://github.com/google/googletest.git
+      GIT_TAG        release-1.12.1
+      GIT_SHALLOW    ON)
+    FetchContent_MakeAvailable(googletest)
   endif()
 
   add_executable(${PROJECT_NAME}_test
     ${CMAKE_CURRENT_SOURCE_DIR}/test/test_BYTETracker.cpp
   )
 
-  target_link_libraries(${PROJECT_NAME}_test
-    ${PROJECT_NAME}
-    GTest::GTest
-    GTest::Main
-    )
+  if(GTest_FOUND)
+    target_link_libraries(${PROJECT_NAME}_test
+      ${PROJECT_NAME}
+      GTest::GTest
+      GTest::Main
+      )
+  else()
+    target_link_libraries(${PROJECT_NAME}_test
+      ${PROJECT_NAME}
+      gtest
+      gtest_main
+      )
+  endif()
 
   gtest_discover_tests(${PROJECT_NAME}_test
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data/YOLOX_ncnn_palace)

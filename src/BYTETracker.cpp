@@ -1,6 +1,8 @@
 #include "ByteTrack/BYTETracker.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <map>
 #include <memory>
@@ -8,17 +10,26 @@
 #include <utility>
 #include <vector>
 
+byte_track::BYTETracker::BYTETracker(const BYTETrackerConfig& config) :
+    config_(config),
+    frame_id_(0),
+    track_id_count_(0),
+    last_timestamp_ns_(0)
+{
+}
+
 byte_track::BYTETracker::BYTETracker(const int& frame_rate,
                                      const int& track_buffer,
                                      const float& track_thresh,
                                      const float& high_thresh,
                                      const float& match_thresh) :
-    track_thresh_(track_thresh),
-    high_thresh_(high_thresh),
-    match_thresh_(match_thresh),
-    max_time_lost_(static_cast<size_t>(frame_rate / 30.0 * track_buffer)),
-    frame_id_(0),
-    track_id_count_(0)
+    BYTETracker(BYTETrackerConfig{
+        .frame_rate = frame_rate,
+        .track_buffer = track_buffer,
+        .track_thresh = track_thresh,
+        .high_thresh = high_thresh,
+        .match_thresh = match_thresh
+    })
 {
 }
 
@@ -26,19 +37,34 @@ byte_track::BYTETracker::~BYTETracker()
 {
 }
 
-std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::update(const std::vector<Object>& objects)
+std::vector<byte_track::BYTETracker::STrackPtr>
+byte_track::BYTETracker::update(const std::vector<Object>& objects, int64_t timestamp_ns)
 {
-    ////////////////// Step 1: Get detections //////////////////
+    return update(objects, {}, timestamp_ns);
+}
+
+std::vector<byte_track::BYTETracker::STrackPtr>
+byte_track::BYTETracker::update(const std::vector<Object>& objects,
+                                const std::vector<BlobObject>& blob_objects,
+                                int64_t timestamp_ns)
+{
+    ////////////////// Step 1: Setup frame & detections //////////////////
     frame_id_++;
 
-    // Create new STracks using the result of object detection
+    // Resolve timestamp: synthesize from frame count if none provided
+    if (timestamp_ns <= 0)
+    {
+        timestamp_ns = static_cast<int64_t>(frame_id_) *
+                       static_cast<int64_t>(1e9 / config_.frame_rate);
+    }
+
+    // Create STracks from model detections
     std::vector<STrackPtr> det_stracks;
     std::vector<STrackPtr> det_low_stracks;
-
-    for (const auto &object : objects)
+    for (const auto& object : objects)
     {
-        const auto strack = std::make_shared<STrack>(object.rect, object.prob);
-        if (object.prob >= track_thresh_)
+        const auto strack = std::make_shared<STrack>(object.rect, object.prob, /*is_blob=*/false);
+        if (object.prob >= config_.track_thresh)
         {
             det_stracks.push_back(strack);
         }
@@ -48,10 +74,29 @@ std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::update(
         }
     }
 
-    // Create lists of existing STrack
-    std::vector<STrackPtr> active_stracks;
-    std::vector<STrackPtr> non_active_stracks;
-    std::vector<STrackPtr> strack_pool;
+    // Create STracks from blob detections (always treated as high-conf for init purposes)
+    for (const auto& blob : blob_objects)
+    {
+        const float r = blob.radius;
+        const Rect<float> rect(blob.x - r, blob.y - r, 2.0f * r, 2.0f * r);
+        // Clamp response to [0,1] to use as confidence
+        const float conf = std::min(1.0f, std::max(0.0f, blob.response));
+        const auto strack = std::make_shared<STrack>(rect, conf, /*is_blob=*/true);
+        // Blob detections always go into the high-conf pool if they pass high_thresh,
+        // otherwise treat like low-conf model detections
+        if (conf >= config_.track_thresh)
+        {
+            det_stracks.push_back(strack);
+        }
+        else
+        {
+            det_low_stracks.push_back(strack);
+        }
+    }
+
+    // Partition existing tracked stracks by activation state
+    std::vector<STrackPtr> active_stracks;    // confirmed (Tracked + New already confirmed)
+    std::vector<STrackPtr> non_active_stracks; // New / probationary
 
     for (const auto& tracked_strack : tracked_stracks_)
     {
@@ -65,15 +110,16 @@ std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::update(
         }
     }
 
-    strack_pool = jointStracks(active_stracks, lost_stracks_);
+    // Pool of tracks to predict: confirmed + shadow
+    std::vector<STrackPtr> strack_pool = jointStracks(active_stracks, shadow_stracks_);
 
-    // Predict current pose by KF
-    for (auto &strack : strack_pool)
+    // Predict all tracks with Kalman filter
+    for (auto& strack : strack_pool)
     {
-        strack->predict();
+        strack->predict(timestamp_ns);
     }
 
-    ////////////////// Step 2: First association, with IoU //////////////////
+    ////////////////// Step 2: First association, with IoU (high-conf dets) //////////////////
     std::vector<STrackPtr> current_tracked_stracks;
     std::vector<STrackPtr> remain_tracked_stracks;
     std::vector<STrackPtr> remain_det_stracks;
@@ -84,31 +130,32 @@ std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::update(
         std::vector<int> unmatch_detection_idx, unmatch_track_idx;
 
         const auto dists = calcIouDistance(strack_pool, det_stracks);
-        linearAssignment(dists, strack_pool.size(), det_stracks.size(), match_thresh_,
+        linearAssignment(dists, strack_pool.size(), det_stracks.size(), config_.match_thresh,
                          matches_idx, unmatch_track_idx, unmatch_detection_idx);
 
-        for (const auto &match_idx : matches_idx)
+        for (const auto& match_idx : matches_idx)
         {
             const auto track = strack_pool[match_idx[0]];
             const auto det = det_stracks[match_idx[1]];
             if (track->getSTrackState() == STrackState::Tracked)
             {
-                track->update(*det, frame_id_);
+                track->update(*det, frame_id_, timestamp_ns);
                 current_tracked_stracks.push_back(track);
             }
             else
             {
-                track->reActivate(*det, frame_id_);
+                // Shadow track re-matched
+                track->reActivate(*det, frame_id_, timestamp_ns);
                 refind_stracks.push_back(track);
             }
         }
 
-        for (const auto &unmatch_idx : unmatch_detection_idx)
+        for (const auto& unmatch_idx : unmatch_detection_idx)
         {
             remain_det_stracks.push_back(det_stracks[unmatch_idx]);
         }
 
-        for (const auto &unmatch_idx : unmatch_track_idx)
+        for (const auto& unmatch_idx : unmatch_track_idx)
         {
             if (strack_pool[unmatch_idx]->getSTrackState() == STrackState::Tracked)
             {
@@ -117,8 +164,8 @@ std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::update(
         }
     }
 
-    ////////////////// Step 3: Second association, using low score dets //////////////////
-    std::vector<STrackPtr> current_lost_stracks;
+    ////////////////// Step 3: Second association, using low-conf dets //////////////////
+    std::vector<STrackPtr> current_shadow_stracks;
 
     {
         std::vector<std::vector<int>> matches_idx;
@@ -128,34 +175,34 @@ std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::update(
         linearAssignment(dists, remain_tracked_stracks.size(), det_low_stracks.size(), 0.5,
                          matches_idx, unmatch_track_idx, unmatch_detection_idx);
 
-        for (const auto &match_idx : matches_idx)
+        for (const auto& match_idx : matches_idx)
         {
             const auto track = remain_tracked_stracks[match_idx[0]];
             const auto det = det_low_stracks[match_idx[1]];
             if (track->getSTrackState() == STrackState::Tracked)
             {
-                track->update(*det, frame_id_);
+                track->update(*det, frame_id_, timestamp_ns);
                 current_tracked_stracks.push_back(track);
             }
             else
             {
-                track->reActivate(*det, frame_id_);
+                track->reActivate(*det, frame_id_, timestamp_ns);
                 refind_stracks.push_back(track);
             }
         }
 
-        for (const auto &unmatch_track : unmatch_track_idx)
+        for (const auto& unmatch_track : unmatch_track_idx)
         {
             const auto track = remain_tracked_stracks[unmatch_track];
-            if (track->getSTrackState() != STrackState::Lost)
+            if (track->getSTrackState() != STrackState::Shadow)
             {
-                track->markAsLost();
-                current_lost_stracks.push_back(track);
+                track->markAsShadow();
+                current_shadow_stracks.push_back(track);
             }
         }
     }
 
-    ////////////////// Step 4: Init new stracks //////////////////
+    ////////////////// Step 4: Init new stracks & manage probationary tracks //////////////////
     std::vector<STrackPtr> current_removed_stracks;
 
     {
@@ -163,70 +210,161 @@ std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::update(
         std::vector<int> unmatch_unconfirmed_idx;
         std::vector<std::vector<int>> matches_idx;
 
-        // Deal with unconfirmed tracks, usually tracks with only one beginning frame
+        // Associate probationary (non-activated) tracks with remaining detections
         const auto dists = calcIouDistance(non_active_stracks, remain_det_stracks);
         linearAssignment(dists, non_active_stracks.size(), remain_det_stracks.size(), 0.7,
                          matches_idx, unmatch_unconfirmed_idx, unmatch_detection_idx);
 
-        for (const auto &match_idx : matches_idx)
+        for (const auto& match_idx : matches_idx)
         {
-            non_active_stracks[match_idx[0]]->update(*remain_det_stracks[match_idx[1]], frame_id_);
-            current_tracked_stracks.push_back(non_active_stracks[match_idx[0]]);
+            const auto track = non_active_stracks[match_idx[0]];
+            const auto det = remain_det_stracks[match_idx[1]];
+            track->update(*det, frame_id_, timestamp_ns);
+            current_tracked_stracks.push_back(track);
         }
 
-        for (const auto &unmatch_idx : unmatch_unconfirmed_idx)
+        for (const auto& unmatch_idx : unmatch_unconfirmed_idx)
         {
+            // Probationary track didn't match; enter shadow and check early termination
             const auto track = non_active_stracks[unmatch_idx];
-            track->markAsRemoved();
-            current_removed_stracks.push_back(track);
+            track->markAsShadow();
+            if (track->getShadowTrackingAge() >=
+                static_cast<size_t>(config_.early_termination_age))
+            {
+                track->markAsRemoved();
+                current_removed_stracks.push_back(track);
+            }
+            else
+            {
+                current_shadow_stracks.push_back(track);
+            }
         }
 
-        // Add new stracks
-        for (const auto &unmatch_idx : unmatch_detection_idx)
+        // Seed new tracks from unmatched high-conf detections
+        for (const auto& unmatch_idx : unmatch_detection_idx)
         {
             const auto track = remain_det_stracks[unmatch_idx];
-            if (track->getScore() < high_thresh_)
+            if (track->getScore() < config_.high_thresh)
             {
                 continue;
             }
             track_id_count_++;
-            track->activate(frame_id_, track_id_count_);
+            track->activate(frame_id_, track_id_count_, timestamp_ns, track->isBlobTrack());
             current_tracked_stracks.push_back(track);
         }
     }
 
-    ////////////////// Step 5: Update state //////////////////
-    for (const auto &lost_strack : lost_stracks_)
+    ////////////////// Step 5: Probation check & shadow expiry //////////////////
+
+    // Check probation for all newly-updated tracks (promote New → Tracked)
+    for (const auto& track : current_tracked_stracks)
     {
-        if (frame_id_ - lost_strack->getFrameId() > max_time_lost_)
+        if (track->getSTrackState() == STrackState::New)
         {
-            lost_strack->markAsRemoved();
-            current_removed_stracks.push_back(lost_strack);
+            bool confirm = false;
+            if (track->isBlobTrack())
+            {
+                confirm = track->getBlobHits() >=
+                          static_cast<size_t>(config_.blob_probation_age);
+            }
+            else
+            {
+                confirm = track->getAge() >=
+                          static_cast<size_t>(config_.probation_age);
+            }
+            if (confirm)
+            {
+                // Transition to Tracked / confirmed
+                // is_activated_ was set in update(); state_ stays Tracked from update()
+            }
         }
     }
 
+    // Handle shadow track expiry
+    for (const auto& shadow_strack : shadow_stracks_)
+    {
+        if (shadow_strack->getSTrackState() == STrackState::Shadow &&
+            shadow_strack->getShadowTrackingAge() >
+                static_cast<size_t>(config_.max_shadow_tracking_age))
+        {
+            shadow_strack->markAsRemoved();
+            current_removed_stracks.push_back(shadow_strack);
+        }
+    }
+
+    ////////////////// Step 6: Maintain track lists //////////////////
     tracked_stracks_ = jointStracks(current_tracked_stracks, refind_stracks);
-    lost_stracks_ = subStracks(jointStracks(subStracks(lost_stracks_, tracked_stracks_), current_lost_stracks), removed_stracks_);
+
+    // Shadow pool: previous shadow tracks (minus any re-found or removed) + new shadow
+    shadow_stracks_ = subStracks(
+        jointStracks(subStracks(shadow_stracks_, tracked_stracks_), current_shadow_stracks),
+        removed_stracks_);
+
     removed_stracks_ = jointStracks(removed_stracks_, current_removed_stracks);
 
-    std::vector<STrackPtr> tracked_stracks_out, lost_stracks_out;
-    removeDuplicateStracks(tracked_stracks_, lost_stracks_, tracked_stracks_out, lost_stracks_out);
+    // Remove duplicates between tracked and shadow
+    std::vector<STrackPtr> tracked_stracks_out, shadow_stracks_out;
+    removeDuplicateStracks(tracked_stracks_, shadow_stracks_,
+                           tracked_stracks_out, shadow_stracks_out);
     tracked_stracks_ = tracked_stracks_out;
-    lost_stracks_ = lost_stracks_out;
+    shadow_stracks_ = shadow_stracks_out;
 
+    last_timestamp_ns_ = timestamp_ns;
+
+    ////////////////// Step 7: Collect output (confirmed Tracked only) //////////////////
     std::vector<STrackPtr> output_stracks;
-    for (const auto &track : tracked_stracks_)
+    for (const auto& track : tracked_stracks_)
     {
-        if (track->isActivated())
+        if (track->isActivated() && track->getSTrackState() == STrackState::Tracked)
         {
-            output_stracks.push_back(track);
+            // Check if probation is satisfied
+            bool passes_probation = false;
+            if (track->isBlobTrack())
+            {
+                passes_probation = track->getBlobHits() >=
+                                   static_cast<size_t>(config_.blob_probation_age);
+            }
+            else
+            {
+                passes_probation = track->getAge() >=
+                                   static_cast<size_t>(config_.probation_age);
+            }
+            if (passes_probation)
+            {
+                output_stracks.push_back(track);
+            }
         }
     }
 
     return output_stracks;
 }
-std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::jointStracks(const std::vector<STrackPtr> &a_tlist,
-                                                                                      const std::vector<STrackPtr> &b_tlist) const
+
+std::vector<byte_track::BYTETracker::STrackPtr>
+byte_track::BYTETracker::getAllTracks() const
+{
+    std::vector<STrackPtr> all;
+    for (const auto& t : tracked_stracks_) all.push_back(t);
+    for (const auto& t : shadow_stracks_) all.push_back(t);
+    return all;
+}
+
+std::vector<byte_track::BYTETracker::STrackPtr>
+byte_track::BYTETracker::getTentativeTracks() const
+{
+    std::vector<STrackPtr> result;
+    for (const auto& t : tracked_stracks_)
+    {
+        if (t->getSTrackState() == STrackState::New)
+        {
+            result.push_back(t);
+        }
+    }
+    return result;
+}
+
+std::vector<byte_track::BYTETracker::STrackPtr>
+byte_track::BYTETracker::jointStracks(const std::vector<STrackPtr> &a_tlist,
+                                      const std::vector<STrackPtr> &b_tlist) const
 {
     std::map<int, int> exists;
     std::vector<STrackPtr> res;
@@ -247,8 +385,9 @@ std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::jointSt
     return res;
 }
 
-std::vector<byte_track::BYTETracker::STrackPtr> byte_track::BYTETracker::subStracks(const std::vector<STrackPtr> &a_tlist,
-                                                                                    const std::vector<STrackPtr> &b_tlist) const
+std::vector<byte_track::BYTETracker::STrackPtr>
+byte_track::BYTETracker::subStracks(const std::vector<STrackPtr> &a_tlist,
+                                    const std::vector<STrackPtr> &b_tlist) const
 {
     std::map<int, STrackPtr> stracks;
     for (size_t i = 0; i < a_tlist.size(); i++)
@@ -294,7 +433,8 @@ void byte_track::BYTETracker::removeDuplicateStracks(const std::vector<STrackPtr
         }
     }
 
-    std::vector<bool> a_overlapping(a_stracks.size(), false), b_overlapping(b_stracks.size(), false);
+    std::vector<bool> a_overlapping(a_stracks.size(), false),
+                      b_overlapping(b_stracks.size(), false);
     for (const auto &[a_idx, b_idx] : overlapping_combinations)
     {
         const int timep = a_stracks[a_idx]->getFrameId() - a_stracks[a_idx]->getStartFrameId();
@@ -373,8 +513,9 @@ void byte_track::BYTETracker::linearAssignment(const std::vector<std::vector<flo
     }
 }
 
-std::vector<std::vector<float>> byte_track::BYTETracker::calcIous(const std::vector<Rect<float>> &a_rect,
-                                                                  const std::vector<Rect<float>> &b_rect) const
+std::vector<std::vector<float>> byte_track::BYTETracker::calcIous(
+    const std::vector<Rect<float>> &a_rect,
+    const std::vector<Rect<float>> &b_rect) const
 {
     std::vector<std::vector<float>> ious;
     if (a_rect.size() * b_rect.size() == 0)
@@ -398,8 +539,9 @@ std::vector<std::vector<float>> byte_track::BYTETracker::calcIous(const std::vec
     return ious;
 }
 
-std::vector<std::vector<float> > byte_track::BYTETracker::calcIouDistance(const std::vector<STrackPtr> &a_tracks,
-                                                                          const std::vector<STrackPtr> &b_tracks) const
+std::vector<std::vector<float>> byte_track::BYTETracker::calcIouDistance(
+    const std::vector<STrackPtr> &a_tracks,
+    const std::vector<STrackPtr> &b_tracks) const
 {
     std::vector<byte_track::Rect<float>> a_rects, b_rects;
     for (size_t i = 0; i < a_tracks.size(); i++)

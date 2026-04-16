@@ -4,20 +4,21 @@
 #include "ByteTrack/KalmanFilter.h"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace byte_track
 {
 enum class STrackState {
-    New = 0,
-    Tracked = 1,
-    Lost = 2,
-    Removed = 3,
+    New = 0,       // Newly created; in probation period, not yet output
+    Tracked = 1,   // Confirmed and actively matched; included in output
+    Shadow = 2,    // Confirmed but unmatched; grace period before removal
+    Removed = 3,   // Expired; no longer tracked
 };
 
 class STrack
 {
 public:
-    STrack(const Rect<float>& rect, const float& score);
+    STrack(const Rect<float>& rect, const float& score, bool is_blob = false);
     ~STrack();
 
     const Rect<float>& getRect() const;
@@ -30,13 +31,24 @@ public:
     const size_t& getStartFrameId() const;
     const size_t& getTrackletLength() const;
 
-    void activate(const size_t& frame_id, const size_t& track_id);
-    void reActivate(const STrack &new_track, const size_t &frame_id, const int &new_track_id = -1);
+    // New getters
+    size_t getAge() const;
+    size_t getShadowTrackingAge() const;
+    size_t getBlobHits() const;
+    bool isBlobTrack() const;
+    int64_t getLastTimestampNs() const;
 
-    void predict();
-    void update(const STrack &new_track, const size_t &frame_id);
+    void activate(const size_t& frame_id, const size_t& track_id,
+                  int64_t ts_ns, bool is_blob = false);
+    void reActivate(const STrack& new_track, const size_t& frame_id,
+                    int64_t ts_ns, const int& new_track_id = -1);
 
-    void markAsLost();
+    // Predict state forward using Kalman filter; dt derived from ts_ns vs last_ts_ns_
+    void predict(int64_t current_ts_ns);
+
+    void update(const STrack& new_track, const size_t& frame_id, int64_t ts_ns);
+
+    void markAsShadow();
     void markAsRemoved();
 
 private:
@@ -53,6 +65,13 @@ private:
     size_t frame_id_;
     size_t start_frame_id_;
     size_t tracklet_len_;
+
+    // Probation / shadow tracking
+    size_t age_;
+    size_t shadow_tracking_age_;
+    size_t blob_hits_;
+    bool is_blob_track_;
+    int64_t last_ts_ns_;  // ns timestamp of last successful match
 
     void updateRect();
 };

@@ -22,7 +22,7 @@ public:
 
     void initiate(StateMean& mean, StateCov& covariance, const DetectBox& measurement);
 
-    void predict(StateMean& mean, StateCov& covariance);
+    void predict(StateMean& mean, StateCov& covariance, float dt = 1.0f);
 
     void update(StateMean& mean, StateCov& covariance, const DetectBox& measurement);
 
@@ -30,8 +30,9 @@ private:
     float std_weight_position_;
     float std_weight_velocity_;
 
-    Eigen::Matrix<float, 8, 8, Eigen::RowMajor> motion_mat_;
     Eigen::Matrix<float, 4, 8, Eigen::RowMajor> update_mat_;
+
+    Eigen::Matrix<float, 8, 8, Eigen::RowMajor> buildMotionMat(float dt) const;
 
     void project(StateHMean &projected_mean, StateHCov &projected_covariance,
                  const StateMean& mean, const StateCov& covariance);
