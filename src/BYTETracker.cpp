@@ -79,7 +79,7 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
     std::vector<STrackPtr> det_low_stracks;
     for (const auto& object : objects)
     {
-        const auto strack = std::make_shared<STrack>(object.rect, object.prob, /*is_blob=*/false);
+        const auto strack = std::make_shared<STrack>(object.rect, object.prob, /*is_blob=*/false, object.label);
         if (object.prob >= config_.track_thresh)
         {
             det_stracks.push_back(strack);
@@ -97,7 +97,7 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
         const Rect<float> rect(blob.x - r, blob.y - r, 2.0f * r, 2.0f * r);
         // Clamp response to [0,1] to use as confidence
         const float conf = std::min(1.0f, std::max(0.0f, blob.response));
-        const auto strack = std::make_shared<STrack>(rect, conf, /*is_blob=*/true);
+        const auto strack = std::make_shared<STrack>(rect, conf, /*is_blob=*/true, blob.label);
         // Blob detections always go into the high-conf pool if they pass high_thresh,
         // otherwise treat like low-conf model detections
         if (conf >= config_.track_thresh)

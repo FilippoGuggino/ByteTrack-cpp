@@ -19,7 +19,7 @@ enum class STrackState {
 class STrack
 {
 public:
-    STrack(const Rect<float>& rect, const float& score, bool is_blob = false);
+    STrack(const Rect<float>& rect, const float& score, bool is_blob = false, int label = -1);
     ~STrack();
 
     const Rect<float>& getRect() const;
@@ -38,6 +38,9 @@ public:
     size_t getBlobHits() const;
     bool isBlobTrack() const;
     int64_t getLastTimestampNs() const;
+    int getClassId() const;
+    size_t getConsecutiveYoloHits() const;
+    bool getYoloEverMatched() const;
 
     void activate(const size_t& frame_id, const size_t& track_id,
                   int64_t ts_ns, bool is_blob = false);
@@ -79,6 +82,11 @@ private:
     size_t blob_hits_;
     bool is_blob_track_;
     int64_t last_ts_ns_;  // ns timestamp of last successful match
+
+    // Detection class and YOLO match tracking
+    int class_id_;                 // -1 = unknown (blob-seeded)
+    size_t consecutive_yolo_hits_; // consecutive frames matched by model; reset on miss or blob match
+    bool yolo_ever_matched_;       // set on first model match, never cleared
 
     void updateRect();
 };

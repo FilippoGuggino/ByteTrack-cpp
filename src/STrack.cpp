@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-byte_track::STrack::STrack(const Rect<float>& rect, const float& score, bool is_blob) :
+byte_track::STrack::STrack(const Rect<float>& rect, const float& score, bool is_blob, int label) :
     kalman_filter_(),
     mean_(),
     covariance_(),
@@ -20,7 +20,10 @@ byte_track::STrack::STrack(const Rect<float>& rect, const float& score, bool is_
     shadow_tracking_age_(0),
     blob_hits_(0),
     is_blob_track_(is_blob),
-    last_ts_ns_(0)
+    last_ts_ns_(0),
+    class_id_(label),
+    consecutive_yolo_hits_(0),
+    yolo_ever_matched_(false)
 {
 }
 
@@ -93,6 +96,21 @@ int64_t byte_track::STrack::getLastTimestampNs() const
     return last_ts_ns_;
 }
 
+int byte_track::STrack::getClassId() const
+{
+    return class_id_;
+}
+
+size_t byte_track::STrack::getConsecutiveYoloHits() const
+{
+    return consecutive_yolo_hits_;
+}
+
+bool byte_track::STrack::getYoloEverMatched() const
+{
+    return yolo_ever_matched_;
+}
+
 void byte_track::STrack::activate(const size_t& frame_id, const size_t& track_id,
                                   int64_t ts_ns, bool is_blob)
 {
@@ -110,6 +128,8 @@ void byte_track::STrack::activate(const size_t& frame_id, const size_t& track_id
     blob_hits_ = is_blob ? 1 : 0;
     is_blob_track_ = is_blob;
     last_ts_ns_ = ts_ns;
+    consecutive_yolo_hits_ = 0;
+    // yolo_ever_matched_ and class_id_ are set from the constructor; do not reset here.
 }
 
 void byte_track::STrack::reActivate(const STrack& new_track, const size_t& frame_id,
@@ -131,6 +151,13 @@ void byte_track::STrack::reActivate(const STrack& new_track, const size_t& frame
     if (!new_track.isBlobTrack())
     {
         is_blob_track_ = false;
+        class_id_ = new_track.getClassId();
+        consecutive_yolo_hits_++;
+        yolo_ever_matched_ = true;
+    }
+    else
+    {
+        consecutive_yolo_hits_ = 0;
     }
     blob_hits_++;
     last_ts_ns_ = ts_ns;
@@ -168,6 +195,13 @@ void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id,
     if (!new_track.isBlobTrack())
     {
         is_blob_track_ = false;
+        class_id_ = new_track.getClassId();
+        consecutive_yolo_hits_++;
+        yolo_ever_matched_ = true;
+    }
+    else
+    {
+        consecutive_yolo_hits_ = 0;
     }
     blob_hits_++;
     last_ts_ns_ = ts_ns;
@@ -177,6 +211,7 @@ void byte_track::STrack::markAsShadow()
 {
     state_ = STrackState::Shadow;
     shadow_tracking_age_++;
+    consecutive_yolo_hits_ = 0;
 }
 
 void byte_track::STrack::markAsRemoved()
