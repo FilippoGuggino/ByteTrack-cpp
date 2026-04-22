@@ -10,10 +10,28 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace byte_track
 {
+// Intrinsic and extrinsic camera parameters needed for ego-motion compensation.
+struct CameraParams {
+    float fx = 0.f, fy = 0.f;  // Focal lengths in pixels
+    float cx = 0.f, cy = 0.f;  // Principal point in pixels
+    // Quaternion rotating camera-frame vectors into drone body frame (q_bc): w, x, y, z
+    float q_bc[4] = {1.f, 0.f, 0.f, 0.f};
+};
+
+// Per-frame drone orientation used to compensate camera ego-motion in the tracker.
+// Matches the PX4 VehicleOdometry quaternion convention (body-to-world, NED world frame).
+struct EgoMotionData {
+    // Body-to-world orientation quaternion (q_wb): w, x, y, z
+    float q_wb[4] = {1.f, 0.f, 0.f, 0.f};
+    // Set to true only when q_wb contains a valid measurement.
+    bool valid = false;
+};
+
 struct BYTETrackerConfig
 {
     // Frame rate used to synthesize timestamps when none are provided (timestamp_ns == 0)
@@ -54,12 +72,22 @@ public:
 
     ~BYTETracker();
 
-    // Primary update: model detections + optional blob detections
+    // Configure camera intrinsics and body-to-camera extrinsic for ego-motion compensation.
+    // Must be called before passing EgoMotionData to update(); otherwise ego-motion is ignored.
+    void setCameraParams(const CameraParams& params);
+
+    // Primary update with ego-motion compensation: model + blob detections + drone orientation.
+    std::vector<STrackPtr> update(const std::vector<Object>& objects,
+                                  const std::vector<BlobObject>& blob_objects,
+                                  const EgoMotionData& ego_motion,
+                                  int64_t timestamp_ns = 0);
+
+    // Backward-compatible: model detections + blob detections, no ego-motion.
     std::vector<STrackPtr> update(const std::vector<Object>& objects,
                                   const std::vector<BlobObject>& blob_objects,
                                   int64_t timestamp_ns = 0);
 
-    // Backward-compatible overload: model detections only
+    // Backward-compatible: model detections only, no ego-motion.
     std::vector<STrackPtr> update(const std::vector<Object>& objects,
                                   int64_t timestamp_ns = 0);
 
@@ -70,6 +98,16 @@ public:
     std::vector<STrackPtr> getTentativeTracks() const;
 
 private:
+    // Rotate each track's Kalman-predicted position to compensate for camera ego-motion.
+    // Uses consecutive drone orientation quaternions to compute the inter-frame camera rotation
+    // and applies the resulting pixel shift to every track in the list.
+    void applyEgoMotionCorrection(std::vector<STrackPtr>& tracks,
+                                  const EgoMotionData& ego_motion);
+
+    std::optional<CameraParams> camera_params_;
+    bool has_prev_orientation_ = false;
+    float q_wb_prev_[4] = {1.f, 0.f, 0.f, 0.f};  // w, x, y, z
+
     std::vector<STrackPtr> jointStracks(const std::vector<STrackPtr> &a_tlist,
                                         const std::vector<STrackPtr> &b_tlist) const;
 

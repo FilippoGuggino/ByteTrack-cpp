@@ -1,5 +1,7 @@
 #include "ByteTrack/BYTETracker.h"
 
+#include "Eigen/Dense"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -37,15 +39,29 @@ byte_track::BYTETracker::~BYTETracker()
 {
 }
 
+void byte_track::BYTETracker::setCameraParams(const CameraParams& params)
+{
+    camera_params_ = params;
+}
+
 std::vector<byte_track::BYTETracker::STrackPtr>
 byte_track::BYTETracker::update(const std::vector<Object>& objects, int64_t timestamp_ns)
 {
-    return update(objects, {}, timestamp_ns);
+    return update(objects, {}, EgoMotionData{}, timestamp_ns);
 }
 
 std::vector<byte_track::BYTETracker::STrackPtr>
 byte_track::BYTETracker::update(const std::vector<Object>& objects,
                                 const std::vector<BlobObject>& blob_objects,
+                                int64_t timestamp_ns)
+{
+    return update(objects, blob_objects, EgoMotionData{}, timestamp_ns);
+}
+
+std::vector<byte_track::BYTETracker::STrackPtr>
+byte_track::BYTETracker::update(const std::vector<Object>& objects,
+                                const std::vector<BlobObject>& blob_objects,
+                                const EgoMotionData& ego_motion,
                                 int64_t timestamp_ns)
 {
     ////////////////// Step 1: Setup frame & detections //////////////////
@@ -118,6 +134,11 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
     {
         strack->predict(timestamp_ns);
     }
+
+    // Compensate camera rotation ego-motion: shift every predicted track position so that
+    // static scene points stay put and only true object motion remains.
+    applyEgoMotionCorrection(strack_pool, ego_motion);
+    applyEgoMotionCorrection(non_active_stracks, ego_motion);
 
     ////////////////// Step 2: First association, with IoU (high-conf dets) //////////////////
     std::vector<STrackPtr> current_tracked_stracks;
@@ -311,6 +332,13 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
 
     last_timestamp_ns_ = timestamp_ns;
 
+    // Store drone orientation for the next frame's ego-motion computation.
+    if (ego_motion.valid)
+    {
+        std::copy(std::begin(ego_motion.q_wb), std::end(ego_motion.q_wb), q_wb_prev_);
+        has_prev_orientation_ = true;
+    }
+
     ////////////////// Step 7: Collect output (confirmed Tracked only) //////////////////
     std::vector<STrackPtr> output_stracks;
     for (const auto& track : tracked_stracks_)
@@ -337,6 +365,40 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
     }
 
     return output_stracks;
+}
+
+void byte_track::BYTETracker::applyEgoMotionCorrection(
+    std::vector<STrackPtr>& tracks, const EgoMotionData& ego_motion)
+{
+    if (!camera_params_.has_value() || !has_prev_orientation_ || !ego_motion.valid
+        || tracks.empty())
+    {
+        return;
+    }
+
+    const auto& cam = *camera_params_;
+
+    // q_wb: body-to-world quaternion (Eigen stores as w, x, y, z in constructor)
+    // q_bc: camera-to-body quaternion
+    // q_wc = q_wb * q_bc → rotates camera-frame vectors into world frame
+    const Eigen::Quaternionf q_wb_prev(q_wb_prev_[0], q_wb_prev_[1],
+                                       q_wb_prev_[2], q_wb_prev_[3]);
+    const Eigen::Quaternionf q_wb_curr(ego_motion.q_wb[0], ego_motion.q_wb[1],
+                                       ego_motion.q_wb[2], ego_motion.q_wb[3]);
+    const Eigen::Quaternionf q_bc(cam.q_bc[0], cam.q_bc[1], cam.q_bc[2], cam.q_bc[3]);
+
+    // R_wc: rotation matrix that transforms camera-frame vectors into world frame.
+    const Eigen::Matrix3f R_wc_prev = (q_wb_prev * q_bc).toRotationMatrix();
+    const Eigen::Matrix3f R_wc_curr = (q_wb_curr * q_bc).toRotationMatrix();
+
+    // R_delta maps a bearing ray from the previous camera frame into the current one.
+    // For a static world point its image-plane position changes by exactly this rotation.
+    const Eigen::Matrix3f R_delta = R_wc_curr.transpose() * R_wc_prev;
+
+    for (auto& track : tracks)
+    {
+        track->applyEgoMotionCorrection(R_delta, cam.fx, cam.fy, cam.cx, cam.cy);
+    }
 }
 
 std::vector<byte_track::BYTETracker::STrackPtr>

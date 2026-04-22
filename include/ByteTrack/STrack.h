@@ -2,6 +2,7 @@
 
 #include "ByteTrack/Rect.h"
 #include "ByteTrack/KalmanFilter.h"
+#include "Eigen/Dense"
 
 #include <cstddef>
 #include <cstdint>
@@ -50,6 +51,12 @@ public:
 
     void markAsShadow();
     void markAsRemoved();
+
+    // Apply camera rotation ego-motion correction to the Kalman state position.
+    // R_delta rotates a bearing ray from the previous camera frame into the current one.
+    // The corrected center is reprojected using the supplied intrinsics and rect_ is synced.
+    void applyEgoMotionCorrection(const Eigen::Matrix3f& R_delta,
+                                  float fx, float fy, float cx, float cy);
 
 private:
     KalmanFilter kalman_filter_;

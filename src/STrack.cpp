@@ -191,3 +191,23 @@ void byte_track::STrack::updateRect()
     rect_.x() = mean_[0] - rect_.width() / 2;
     rect_.y() = mean_[1] - rect_.height() / 2;
 }
+
+void byte_track::STrack::applyEgoMotionCorrection(
+    const Eigen::Matrix3f& R_delta, float fx, float fy, float cx, float cy)
+{
+    // Use the Kalman predicted center (mean_[0], mean_[1]) directly — rect_ may be
+    // stale if predict() was called without a subsequent updateRect().
+    const float u = mean_[0];
+    const float v = mean_[1];
+
+    // Unproject pixel center to a unit-depth bearing ray in the previous camera frame.
+    const Eigen::Vector3f ray((u - cx) / fx, (v - cy) / fy, 1.f);
+
+    // Rotate into the current camera frame (depth-independent for pure rotation).
+    const Eigen::Vector3f ray_new = R_delta * ray;
+
+    // Reproject to pixel coordinates and update the Kalman state.
+    mean_[0] = fx * ray_new.x() / ray_new.z() + cx;
+    mean_[1] = fy * ray_new.y() / ray_new.z() + cy;
+    updateRect();
+}
