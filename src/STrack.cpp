@@ -207,6 +207,12 @@ void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id,
     last_ts_ns_ = ts_ns;
 }
 
+void byte_track::STrack::promote()
+{
+    state_ = STrackState::Tracked;
+    is_activated_ = true;
+}
+
 void byte_track::STrack::markAsShadow()
 {
     state_ = STrackState::Shadow;

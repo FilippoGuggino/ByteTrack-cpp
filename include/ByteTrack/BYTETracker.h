@@ -54,6 +54,8 @@ struct BYTETrackerConfig
     int max_shadow_tracking_age = 3;
     // New (probationary) tracks are removed after this many frames in shadow
     int early_termination_age = 1;
+    // Max center-point distance (pixels) for matching blob tracks; beyond this, cost = 1.0
+    float blob_match_max_dist_px = 100.0f;
 };
 
 class BYTETracker
@@ -129,6 +131,11 @@ private:
 
     std::vector<std::vector<float>> calcIouDistance(const std::vector<STrackPtr> &a_tracks,
                                                     const std::vector<STrackPtr> &b_tracks) const;
+
+    // Blob-aware distance: for any pair involving a blob track, uses Euclidean center-point
+    // distance normalized by blob_match_max_dist_px; otherwise falls back to 1 - IoU.
+    std::vector<std::vector<float>> calcMatchingDistance(const std::vector<STrackPtr> &a_tracks,
+                                                         const std::vector<STrackPtr> &b_tracks) const;
 
     std::vector<std::vector<float>> calcIous(const std::vector<Rect<float>> &a_rect,
                                              const std::vector<Rect<float>> &b_rect) const;

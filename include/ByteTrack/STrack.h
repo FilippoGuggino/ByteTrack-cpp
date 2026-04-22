@@ -52,6 +52,7 @@ public:
 
     void update(const STrack& new_track, const size_t& frame_id, int64_t ts_ns);
 
+    void promote();  // Transition New → Tracked once probation is satisfied
     void markAsShadow();
     void markAsRemoved();
 

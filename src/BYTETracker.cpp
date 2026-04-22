@@ -3,6 +3,7 @@
 #include "Eigen/Dense"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -150,7 +151,7 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
         std::vector<std::vector<int>> matches_idx;
         std::vector<int> unmatch_detection_idx, unmatch_track_idx;
 
-        const auto dists = calcIouDistance(strack_pool, det_stracks);
+        const auto dists = calcMatchingDistance(strack_pool, det_stracks);
         linearAssignment(dists, strack_pool.size(), det_stracks.size(), config_.match_thresh,
                          matches_idx, unmatch_track_idx, unmatch_detection_idx);
 
@@ -192,7 +193,7 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
         std::vector<std::vector<int>> matches_idx;
         std::vector<int> unmatch_track_idx, unmatch_detection_idx;
 
-        const auto dists = calcIouDistance(remain_tracked_stracks, det_low_stracks);
+        const auto dists = calcMatchingDistance(remain_tracked_stracks, det_low_stracks);
         linearAssignment(dists, remain_tracked_stracks.size(), det_low_stracks.size(), 0.5,
                          matches_idx, unmatch_track_idx, unmatch_detection_idx);
 
@@ -232,7 +233,7 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
         std::vector<std::vector<int>> matches_idx;
 
         // Associate probationary (non-activated) tracks with remaining detections
-        const auto dists = calcIouDistance(non_active_stracks, remain_det_stracks);
+        const auto dists = calcMatchingDistance(non_active_stracks, remain_det_stracks);
         linearAssignment(dists, non_active_stracks.size(), remain_det_stracks.size(), 0.7,
                          matches_idx, unmatch_unconfirmed_idx, unmatch_detection_idx);
 
@@ -295,8 +296,7 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
             }
             if (confirm)
             {
-                // Transition to Tracked / confirmed
-                // is_activated_ was set in update(); state_ stays Tracked from update()
+                track->promote();
             }
         }
     }
@@ -630,6 +630,45 @@ std::vector<std::vector<float>> byte_track::BYTETracker::calcIouDistance(
     }
 
     return cost_matrix;
+}
+
+std::vector<std::vector<float>> byte_track::BYTETracker::calcMatchingDistance(
+    const std::vector<STrackPtr>& a_tracks,
+    const std::vector<STrackPtr>& b_tracks) const
+{
+    if (a_tracks.empty() || b_tracks.empty())
+    {
+        return {};
+    }
+
+    std::vector<std::vector<float>> dist(a_tracks.size(),
+                                         std::vector<float>(b_tracks.size()));
+    for (size_t i = 0; i < a_tracks.size(); i++)
+    {
+        for (size_t j = 0; j < b_tracks.size(); j++)
+        {
+            const auto& ta = a_tracks[i];
+            const auto& tb = b_tracks[j];
+            if (ta->isBlobTrack() || tb->isBlobTrack())
+            {
+                const auto& ra = ta->getRect();
+                const auto& rb = tb->getRect();
+                const float cx_a = ra.x() + ra.width() * 0.5f;
+                const float cy_a = ra.y() + ra.height() * 0.5f;
+                const float cx_b = rb.x() + rb.width() * 0.5f;
+                const float cy_b = rb.y() + rb.height() * 0.5f;
+                const float dx = cx_a - cx_b;
+                const float dy = cy_a - cy_b;
+                const float d = std::sqrt(dx * dx + dy * dy);
+                dist[i][j] = std::min(1.0f, d / config_.blob_match_max_dist_px);
+            }
+            else
+            {
+                dist[i][j] = 1.0f - ta->getRect().calcIoU(tb->getRect());
+            }
+        }
+    }
+    return dist;
 }
 
 double byte_track::BYTETracker::execLapjv(const std::vector<std::vector<float>> &cost,
