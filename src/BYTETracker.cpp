@@ -99,8 +99,24 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
         // Clamp response to [0,1] to use as confidence
         const float conf = std::min(1.0f, std::max(0.0f, blob.response));
         const auto strack = std::make_shared<STrack>(rect, conf, /*is_blob=*/true, blob.label);
-        // Blob detections always go into the high-conf pool if they pass high_thresh,
-        // otherwise treat like low-conf model detections
+
+        // Suppress blob if its center falls inside any YOLO detection bbox from this frame.
+        // det_stracks holds only this frame's YOLO STracks at this point; iterating it
+        // gives the current-frame YOLO detections before any blobs are added.
+        bool suppressed = false;
+        for (const auto& yolo_strack : det_stracks)
+        {
+            if (yolo_strack->isBlobTrack()) { continue; }
+            const auto& ry = yolo_strack->getRect();
+            if (blob.x >= ry.x() && blob.x <= ry.x() + ry.width() &&
+                blob.y >= ry.y() && blob.y <= ry.y() + ry.height())
+            {
+                suppressed = true;
+                break;
+            }
+        }
+        if (suppressed) { continue; }
+
         if (conf >= config_.track_thresh)
         {
             det_stracks.push_back(strack);
@@ -161,13 +177,15 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
             const auto det = det_stracks[match_idx[1]];
             if (track->getSTrackState() == STrackState::Tracked)
             {
-                track->update(*det, frame_id_, timestamp_ns);
+                track->update(*det, frame_id_, timestamp_ns,
+                              static_cast<size_t>(config_.blob_to_yolo_transition_hits));
                 current_tracked_stracks.push_back(track);
             }
             else
             {
                 // Shadow track re-matched
-                track->reActivate(*det, frame_id_, timestamp_ns);
+                track->reActivate(*det, frame_id_, timestamp_ns, -1,
+                                  static_cast<size_t>(config_.blob_to_yolo_transition_hits));
                 refind_stracks.push_back(track);
             }
         }
@@ -203,12 +221,14 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
             const auto det = det_low_stracks[match_idx[1]];
             if (track->getSTrackState() == STrackState::Tracked)
             {
-                track->update(*det, frame_id_, timestamp_ns);
+                track->update(*det, frame_id_, timestamp_ns,
+                              static_cast<size_t>(config_.blob_to_yolo_transition_hits));
                 current_tracked_stracks.push_back(track);
             }
             else
             {
-                track->reActivate(*det, frame_id_, timestamp_ns);
+                track->reActivate(*det, frame_id_, timestamp_ns, -1,
+                                  static_cast<size_t>(config_.blob_to_yolo_transition_hits));
                 refind_stracks.push_back(track);
             }
         }
@@ -241,7 +261,8 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
         {
             const auto track = non_active_stracks[match_idx[0]];
             const auto det = remain_det_stracks[match_idx[1]];
-            track->update(*det, frame_id_, timestamp_ns);
+            track->update(*det, frame_id_, timestamp_ns,
+                          static_cast<size_t>(config_.blob_to_yolo_transition_hits));
             current_tracked_stracks.push_back(track);
         }
 
@@ -301,11 +322,15 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
         }
     }
 
-    // Handle shadow track expiry
+    // Handle shadow track expiry — increment age every frame a track stays in shadow
     for (const auto& shadow_strack : shadow_stracks_)
     {
-        if (shadow_strack->getSTrackState() == STrackState::Shadow &&
-            shadow_strack->getShadowTrackingAge() >
+        if (shadow_strack->getSTrackState() != STrackState::Shadow)
+        {
+            continue;  // Already re-activated in Step 2
+        }
+        shadow_strack->markAsShadow();  // Increments shadow_tracking_age_ each frame
+        if (shadow_strack->getShadowTrackingAge() >
                 static_cast<size_t>(config_.max_shadow_tracking_age))
         {
             shadow_strack->markAsRemoved();
@@ -649,22 +674,27 @@ std::vector<std::vector<float>> byte_track::BYTETracker::calcMatchingDistance(
         {
             const auto& ta = a_tracks[i];
             const auto& tb = b_tracks[j];
+            const auto& ra = ta->getRect();
+            const auto& rb = tb->getRect();
+            const float cx_a = ra.x() + ra.width() * 0.5f;
+            const float cy_a = ra.y() + ra.height() * 0.5f;
+            const float cx_b = rb.x() + rb.width() * 0.5f;
+            const float cy_b = rb.y() + rb.height() * 0.5f;
+            const float dx = cx_a - cx_b;
+            const float dy = cy_a - cy_b;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            const float centroid_d = std::min(1.0f, d / config_.blob_match_max_dist_px);
+
             if (ta->isBlobTrack() || tb->isBlobTrack())
             {
-                const auto& ra = ta->getRect();
-                const auto& rb = tb->getRect();
-                const float cx_a = ra.x() + ra.width() * 0.5f;
-                const float cy_a = ra.y() + ra.height() * 0.5f;
-                const float cx_b = rb.x() + rb.width() * 0.5f;
-                const float cy_b = rb.y() + rb.height() * 0.5f;
-                const float dx = cx_a - cx_b;
-                const float dy = cy_a - cy_b;
-                const float d = std::sqrt(dx * dx + dy * dy);
-                dist[i][j] = std::min(1.0f, d / config_.blob_match_max_dist_px);
+                dist[i][j] = centroid_d;
             }
             else
             {
-                dist[i][j] = 1.0f - ta->getRect().calcIoU(tb->getRect());
+                // For YOLO-YOLO pairs, take the better of IoU and centroid distance.
+                // Centroid acts as a fallback when Kalman prediction has drifted.
+                const float iou_d = 1.0f - ra.calcIoU(rb);
+                dist[i][j] = std::min(centroid_d, iou_d);
             }
         }
     }

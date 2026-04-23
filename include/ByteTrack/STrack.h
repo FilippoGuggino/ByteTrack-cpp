@@ -45,12 +45,14 @@ public:
     void activate(const size_t& frame_id, const size_t& track_id,
                   int64_t ts_ns, bool is_blob = false);
     void reActivate(const STrack& new_track, const size_t& frame_id,
-                    int64_t ts_ns, const int& new_track_id = -1);
+                    int64_t ts_ns, const int& new_track_id = -1,
+                    size_t blob_to_yolo_transition_hits = 1);
 
     // Predict state forward using Kalman filter; dt derived from ts_ns vs last_ts_ns_
     void predict(int64_t current_ts_ns);
 
-    void update(const STrack& new_track, const size_t& frame_id, int64_t ts_ns);
+    void update(const STrack& new_track, const size_t& frame_id, int64_t ts_ns,
+                size_t blob_to_yolo_transition_hits = 1);
 
     void promote();  // Transition New → Tracked once probation is satisfied
     void markAsShadow();

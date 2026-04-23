@@ -56,6 +56,9 @@ struct BYTETrackerConfig
     int early_termination_age = 1;
     // Max center-point distance (pixels) for matching blob tracks; beyond this, cost = 1.0
     float blob_match_max_dist_px = 100.0f;
+    // Consecutive YOLO hits required before a blob-originated track switches from centroid-distance
+    // matching to IoU matching. Keeps centroid distance while the Kalman box converges to YOLO size.
+    int blob_to_yolo_transition_hits = 3;
 };
 
 class BYTETracker

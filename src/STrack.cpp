@@ -133,7 +133,8 @@ void byte_track::STrack::activate(const size_t& frame_id, const size_t& track_id
 }
 
 void byte_track::STrack::reActivate(const STrack& new_track, const size_t& frame_id,
-                                    int64_t ts_ns, const int& new_track_id)
+                                    int64_t ts_ns, const int& new_track_id,
+                                    size_t blob_to_yolo_transition_hits)
 {
     kalman_filter_.update(mean_, covariance_, new_track.getRect().getXyah());
     updateRect();
@@ -150,10 +151,15 @@ void byte_track::STrack::reActivate(const STrack& new_track, const size_t& frame
     shadow_tracking_age_ = 0;
     if (!new_track.isBlobTrack())
     {
-        is_blob_track_ = false;
-        class_id_ = new_track.getClassId();
         consecutive_yolo_hits_++;
         yolo_ever_matched_ = true;
+        class_id_ = new_track.getClassId();
+        // Only clear is_blob_track_ after enough consecutive YOLO hits so that the Kalman
+        // filter has time to converge on YOLO box dimensions before switching to IoU matching.
+        if (consecutive_yolo_hits_ >= blob_to_yolo_transition_hits)
+        {
+            is_blob_track_ = false;
+        }
     }
     else
     {
@@ -181,7 +187,8 @@ void byte_track::STrack::predict(int64_t current_ts_ns)
     kalman_filter_.predict(mean_, covariance_, dt);
 }
 
-void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id, int64_t ts_ns)
+void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id, int64_t ts_ns,
+                                size_t blob_to_yolo_transition_hits)
 {
     kalman_filter_.update(mean_, covariance_, new_track.getRect().getXyah());
     updateRect();
@@ -194,10 +201,15 @@ void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id,
     shadow_tracking_age_ = 0;
     if (!new_track.isBlobTrack())
     {
-        is_blob_track_ = false;
-        class_id_ = new_track.getClassId();
         consecutive_yolo_hits_++;
         yolo_ever_matched_ = true;
+        class_id_ = new_track.getClassId();
+        // Only clear is_blob_track_ after enough consecutive YOLO hits so that the Kalman
+        // filter has time to converge on YOLO box dimensions before switching to IoU matching.
+        if (consecutive_yolo_hits_ >= blob_to_yolo_transition_hits)
+        {
+            is_blob_track_ = false;
+        }
     }
     else
     {
