@@ -136,7 +136,21 @@ void byte_track::STrack::reActivate(const STrack& new_track, const size_t& frame
                                     int64_t ts_ns, const int& new_track_id,
                                     size_t blob_to_yolo_transition_hits)
 {
-    kalman_filter_.update(mean_, covariance_, new_track.getRect().getXyah());
+    if (is_blob_track_ && !new_track.isBlobTrack() && consecutive_yolo_hits_ == 0)
+    {
+        // First YOLO match on a blob-seeded track: Kalman scale (ar, h) is stuck at blob
+        // dimensions and converges very slowly. Re-initiate from the YOLO measurement,
+        // preserving position velocity so prediction remains useful.
+        const float vx = mean_[4];
+        const float vy = mean_[5];
+        kalman_filter_.initiate(mean_, covariance_, new_track.getRect().getXyah());
+        mean_[4] = vx;
+        mean_[5] = vy;
+    }
+    else
+    {
+        kalman_filter_.update(mean_, covariance_, new_track.getRect().getXyah());
+    }
     updateRect();
 
     state_ = STrackState::Tracked;
@@ -190,7 +204,21 @@ void byte_track::STrack::predict(int64_t current_ts_ns)
 void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id, int64_t ts_ns,
                                 size_t blob_to_yolo_transition_hits)
 {
-    kalman_filter_.update(mean_, covariance_, new_track.getRect().getXyah());
+    if (is_blob_track_ && !new_track.isBlobTrack() && consecutive_yolo_hits_ == 0)
+    {
+        // First YOLO match on a blob-seeded track: Kalman scale (ar, h) is stuck at blob
+        // dimensions and converges very slowly. Re-initiate from the YOLO measurement,
+        // preserving position velocity so prediction remains useful.
+        const float vx = mean_[4];
+        const float vy = mean_[5];
+        kalman_filter_.initiate(mean_, covariance_, new_track.getRect().getXyah());
+        mean_[4] = vx;
+        mean_[5] = vy;
+    }
+    else
+    {
+        kalman_filter_.update(mean_, covariance_, new_track.getRect().getXyah());
+    }
     updateRect();
 
     state_ = STrackState::Tracked;

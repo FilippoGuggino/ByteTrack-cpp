@@ -683,16 +683,20 @@ std::vector<std::vector<float>> byte_track::BYTETracker::calcMatchingDistance(
             const float dx = cx_a - cx_b;
             const float dy = cy_a - cy_b;
             const float d = std::sqrt(dx * dx + dy * dy);
-            const float centroid_d = std::min(1.0f, d / config_.blob_match_max_dist_px);
 
             if (ta->isBlobTrack() || tb->isBlobTrack())
             {
+                const float centroid_d = std::min(1.0f, d / config_.blob_match_max_dist_px);
                 dist[i][j] = centroid_d;
             }
             else
             {
-                // For YOLO-YOLO pairs, take the better of IoU and centroid distance.
-                // Centroid acts as a fallback when Kalman prediction has drifted.
+                // For YOLO-YOLO pairs, scale the centroid threshold by the average object
+                // size so that a fast-approaching target (large bbox, large inter-frame
+                // shift) can still be matched when IoU collapses to zero.
+                const float avg_dim_sum = ra.width() + rb.width() + ra.height() + rb.height();
+                const float scale = std::max(config_.blob_match_max_dist_px, 0.5f * avg_dim_sum);
+                const float centroid_d = std::min(1.0f, d / scale);
                 const float iou_d = 1.0f - ra.calcIoU(rb);
                 dist[i][j] = std::min(centroid_d, iou_d);
             }
