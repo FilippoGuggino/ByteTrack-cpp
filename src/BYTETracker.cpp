@@ -292,6 +292,10 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
                 continue;
             }
             track_id_count_++;
+            if (camera_params_.has_value())
+            {
+                track->setEkfConfig(*camera_params_, config_.expected_object_size_m);
+            }
             track->activate(frame_id_, track_id_count_, timestamp_ns, track->isBlobTrack());
             current_tracked_stracks.push_back(track);
         }

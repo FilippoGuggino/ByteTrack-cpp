@@ -1,11 +1,13 @@
 #pragma once
 
+#include "ByteTrack/CameraParams.h"
 #include "ByteTrack/Rect.h"
 #include "ByteTrack/KalmanFilter.h"
 #include "Eigen/Dense"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace byte_track
 {
@@ -50,6 +52,10 @@ public:
                     int64_t ts_ns, const int& new_track_id = -1,
                     size_t blob_to_yolo_transition_hits = 1);
 
+    // Configure the EKF with camera intrinsics and expected physical target size.
+    // Must be called before activate() for 3D tracking to work correctly.
+    void setEkfConfig(const CameraParams& cam, float expected_size_m);
+
     // Predict state forward using Kalman filter; dt derived from ts_ns vs last_ts_ns_
     void predict(int64_t current_ts_ns);
 
@@ -60,9 +66,9 @@ public:
     void markAsShadow();
     void markAsRemoved();
 
-    // Apply camera rotation ego-motion correction to the Kalman state position.
-    // R_delta rotates a bearing ray from the previous camera frame into the current one.
-    // The corrected center is reprojected using the supplied intrinsics and rect_ is synced.
+    // Apply camera rotation ego-motion correction to the Kalman state.
+    // R_delta rotates a vector from the previous camera frame into the current one.
+    // With the 3D EKF state, both position and velocity are rotated directly.
     void applyEgoMotionCorrection(const Eigen::Matrix3f& R_delta,
                                   float fx, float fy, float cx, float cy);
 
@@ -70,6 +76,10 @@ private:
     KalmanFilter kalman_filter_;
     KalmanFilter::StateMean mean_;
     KalmanFilter::StateCov covariance_;
+
+    std::optional<CameraParams> cam_config_;
+    float expected_size_m_ = 0.5f;
+    float stored_ar_ = 1.0f;  // aspect ratio from last detection, for rect back-projection
 
     Rect<float> rect_;
     Rect<float> rect_measured_;
@@ -95,6 +105,8 @@ private:
     size_t consecutive_yolo_hits_; // consecutive frames matched by model; reset on miss or blob match
     bool yolo_ever_matched_;       // set on first model match, never cleared
 
+    // Back-project the EKF 3D state to a pixel-space bounding box.
+    // Falls back to the old pixel-space formula when cam_config_ is not set.
     void updateRect();
 };
 }

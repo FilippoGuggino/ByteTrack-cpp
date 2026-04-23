@@ -1,96 +1,161 @@
 #include "ByteTrack/KalmanFilter.h"
 
 #include <cmath>
-#include <cstddef>
 
-byte_track::KalmanFilter::KalmanFilter(const float& std_weight_position,
-                                       const float& std_weight_velocity) :
-    std_weight_position_(std_weight_position),
-    std_weight_velocity_(std_weight_velocity)
+byte_track::KalmanFilter::KalmanFilter(float q_pos, float q_vel,
+                                       float q_pos_z, float q_vel_z,
+                                       float q_size,
+                                       float r_px, float r_h_px) :
+    q_pos_(q_pos),
+    q_vel_(q_vel),
+    q_pos_z_(q_pos_z),
+    q_vel_z_(q_vel_z),
+    q_size_(q_size),
+    r_px_(r_px),
+    r_h_px_(r_h_px)
 {
-    update_mat_ = Eigen::MatrixXf::Identity(4, 8);
 }
 
-Eigen::Matrix<float, 8, 8, Eigen::RowMajor>
-byte_track::KalmanFilter::buildMotionMat(float dt) const
+Eigen::Matrix<float, 7, 7, Eigen::RowMajor>
+byte_track::KalmanFilter::buildF(float dt) const
 {
-    constexpr size_t ndim = 4;
-    Eigen::Matrix<float, 8, 8, Eigen::RowMajor> motion_mat = Eigen::MatrixXf::Identity(8, 8);
-    for (size_t i = 0; i < ndim; i++)
-    {
-        motion_mat(i, ndim + i) = dt;
-    }
-    return motion_mat;
+    Eigen::Matrix<float, 7, 7, Eigen::RowMajor> F =
+        Eigen::Matrix<float, 7, 7, Eigen::RowMajor>::Identity();
+    // position += velocity * dt  (top-right 3×3 block)
+    F(0, 3) = dt;
+    F(1, 4) = dt;
+    F(2, 5) = dt;
+    return F;
 }
 
-void byte_track::KalmanFilter::initiate(StateMean &mean, StateCov &covariance, const DetectBox &measurement)
+Eigen::Matrix<float, 7, 7, Eigen::RowMajor>
+byte_track::KalmanFilter::buildQ(float dt) const
 {
-    mean.block<1, 4>(0, 0) = measurement.block<1, 4>(0, 0);
-    mean.block<1, 4>(0, 4) = Eigen::Vector4f::Zero();
-
-    StateMean std;
-    std(0) = 2 * std_weight_position_ * measurement[3];
-    std(1) = 2 * std_weight_position_ * measurement[3];
-    std(2) = 1e-2;
-    std(3) = 2 * std_weight_position_ * measurement[3];
-    std(4) = 10 * std_weight_velocity_ * measurement[3];
-    std(5) = 10 * std_weight_velocity_ * measurement[3];
-    std(6) = 1e-5;
-    std(7) = 10 * std_weight_velocity_ * measurement[3];
-
-    StateMean tmp = std.array().square();
-    covariance = tmp.asDiagonal();
+    Eigen::Matrix<float, 7, 7, Eigen::RowMajor> Q =
+        Eigen::Matrix<float, 7, 7, Eigen::RowMajor>::Zero();
+    Q(0, 0) = q_pos_  * dt;
+    Q(1, 1) = q_pos_  * dt;
+    Q(2, 2) = q_pos_z_ * dt;
+    Q(3, 3) = q_vel_  * dt;
+    Q(4, 4) = q_vel_  * dt;
+    Q(5, 5) = q_vel_z_ * dt;
+    Q(6, 6) = q_size_ * dt;
+    return Q;
 }
 
-void byte_track::KalmanFilter::predict(StateMean &mean, StateCov &covariance, float dt)
+Eigen::Matrix<float, 3, 3, Eigen::RowMajor>
+byte_track::KalmanFilter::buildR() const
 {
-    const float sqrt_dt = std::sqrt(dt);
-
-    StateMean std;
-    std(0) = std_weight_position_ * mean(3) * sqrt_dt;
-    std(1) = std_weight_position_ * mean(3) * sqrt_dt;
-    std(2) = 1e-2f * sqrt_dt;
-    std(3) = std_weight_position_ * mean(3) * sqrt_dt;
-    std(4) = std_weight_velocity_ * mean(3) * sqrt_dt;
-    std(5) = std_weight_velocity_ * mean(3) * sqrt_dt;
-    std(6) = 1e-5f * sqrt_dt;
-    std(7) = std_weight_velocity_ * mean(3) * sqrt_dt;
-
-    StateMean tmp = std.array().square();
-    StateCov motion_cov = tmp.asDiagonal();
-
-    const auto motion_mat = buildMotionMat(dt);
-    mean = motion_mat * mean.transpose();
-    covariance = motion_mat * covariance * (motion_mat.transpose()) + motion_cov;
+    Eigen::Matrix<float, 3, 3, Eigen::RowMajor> R =
+        Eigen::Matrix<float, 3, 3, Eigen::RowMajor>::Zero();
+    R(0, 0) = r_px_   * r_px_;
+    R(1, 1) = r_px_   * r_px_;
+    R(2, 2) = r_h_px_ * r_h_px_;
+    return R;
 }
 
-void byte_track::KalmanFilter::update(StateMean &mean, StateCov &covariance, const DetectBox &measurement)
+byte_track::KalmanFilter::MeasVec
+byte_track::KalmanFilter::measurementFunction(const StateMean& mean,
+                                              const CameraParams& cam) const
 {
-    StateHMean projected_mean;
-    StateHCov projected_cov;
-    project(projected_mean, projected_cov, mean, covariance);
-
-    Eigen::Matrix<float, 4, 8> B = (covariance * (update_mat_.transpose())).transpose();
-    Eigen::Matrix<float, 8, 4> kalman_gain = (projected_cov.llt().solve(B)).transpose();
-    Eigen::Matrix<float, 1, 4> innovation = measurement - projected_mean;
-
-    const auto tmp = innovation * (kalman_gain.transpose());
-    mean = (mean.array() + tmp.array()).matrix();
-    covariance = covariance - kalman_gain * projected_cov * (kalman_gain.transpose());
+    const float X = mean(0), Y = mean(1), Z = mean(2), s = mean(6);
+    MeasVec h;
+    h(0) = cam.fx * X / Z + cam.cx;
+    h(1) = cam.fy * Y / Z + cam.cy;
+    h(2) = cam.fy * s / Z;
+    return h;
 }
 
-void byte_track::KalmanFilter::project(StateHMean &projected_mean, StateHCov &projected_covariance,
-                                       const StateMean& mean, const StateCov& covariance)
+byte_track::KalmanFilter::MeasJacobian
+byte_track::KalmanFilter::measurementJacobian(const StateMean& mean,
+                                              const CameraParams& cam) const
 {
-    DetectBox std;
-    std << std_weight_position_ * mean(3),
-           std_weight_position_ * mean(3),
-           1e-1,
-           std_weight_position_ * mean(3);
+    const float X = mean(0), Y = mean(1), Z = mean(2), s = mean(6);
+    const float Z2 = Z * Z;
 
-    projected_mean = update_mat_ * mean.transpose();
-    projected_covariance = update_mat_ * covariance * (update_mat_.transpose());
+    MeasJacobian H = MeasJacobian::Zero();
+    // ∂(fx·X/Z + cx)/∂x
+    H(0, 0) =  cam.fx / Z;
+    H(0, 2) = -cam.fx * X / Z2;
+    // ∂(fy·Y/Z + cy)/∂x
+    H(1, 1) =  cam.fy / Z;
+    H(1, 2) = -cam.fy * Y / Z2;
+    // ∂(fy·s/Z)/∂x
+    H(2, 2) = -cam.fy * s / Z2;
+    H(2, 6) =  cam.fy / Z;
+    return H;
+}
 
-    Eigen::Matrix<float, 4, 4> diag = std.asDiagonal();
-    projected_covariance += diag.array().square().matrix();
+void byte_track::KalmanFilter::initiate(StateMean& mean, StateCov& covariance,
+                                        const CameraParams& cam,
+                                        const Xyah<float>& xyah,
+                                        float expected_size_m)
+{
+    const float cx_px = xyah(0);
+    const float cy_px = xyah(1);
+    const float h_px  = xyah(3);
+
+    // Estimate depth from apparent height and known physical size.
+    const float Z0   = cam.fy * expected_size_m / h_px;
+    const float X0   = (cx_px - cam.cx) / cam.fx * Z0;
+    const float Y0   = (cy_px - cam.cy) / cam.fy * Z0;
+
+    mean = StateMean::Zero();
+    mean(0) = X0;
+    mean(1) = Y0;
+    mean(2) = Z0;
+    mean(6) = expected_size_m;
+
+    // Initial covariance: lateral position well-known from pixels,
+    // depth more uncertain, velocity completely unknown.
+    const float sig_xy   = 0.10f * Z0;
+    const float sig_z    = 0.30f * Z0;
+    const float sig_vel  = 2.0f;
+    const float sig_size = 0.10f * expected_size_m;
+
+    StateMean std_vec;
+    std_vec(0) = sig_xy;
+    std_vec(1) = sig_xy;
+    std_vec(2) = sig_z;
+    std_vec(3) = sig_vel;
+    std_vec(4) = sig_vel;
+    std_vec(5) = sig_vel;
+    std_vec(6) = sig_size;
+
+    covariance = std_vec.array().square().matrix().asDiagonal();
+}
+
+void byte_track::KalmanFilter::predict(StateMean& mean, StateCov& covariance, float dt)
+{
+    const auto F = buildF(dt);
+    const auto Q = buildQ(dt);
+    mean       = (F * mean.transpose()).transpose();
+    covariance = F * covariance * F.transpose() + Q;
+}
+
+void byte_track::KalmanFilter::update(StateMean& mean, StateCov& covariance,
+                                      const CameraParams& cam,
+                                      const Xyah<float>& xyah)
+{
+    // Build measurement vector [cx_px, cy_px, h_px].
+    MeasVec z;
+    z(0) = xyah(0);
+    z(1) = xyah(1);
+    z(2) = xyah(3);
+
+    const MeasVec      h = measurementFunction(mean, cam);
+    const MeasJacobian H = measurementJacobian(mean, cam);
+    const MeasCov      R = buildR();
+
+    // Innovation covariance S = H·P·Hᵀ + R
+    const MeasCov S = H * covariance * H.transpose() + R;
+
+    // Kalman gain K = P·Hᵀ·S⁻¹  →  solve Sᵀ·Kᵀ = H·Pᵀ
+    const Eigen::Matrix<float, 7, 3> K =
+        (S.llt().solve((covariance * H.transpose()).transpose())).transpose();
+
+    // State and covariance update.
+    const MeasVec innovation = z - h;
+    mean       = (mean.transpose() + K * innovation.transpose()).transpose();
+    covariance = covariance - K * S * K.transpose();
 }

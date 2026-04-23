@@ -8,6 +8,9 @@ byte_track::STrack::STrack(const Rect<float>& rect, const float& score, bool is_
     kalman_filter_(),
     mean_(),
     covariance_(),
+    cam_config_(std::nullopt),
+    expected_size_m_(0.5f),
+    stored_ar_(1.0f),
     rect_(rect),
     rect_measured_(rect),
     has_fresh_measurement_(false),
@@ -123,10 +126,22 @@ bool byte_track::STrack::getYoloEverMatched() const
     return yolo_ever_matched_;
 }
 
+void byte_track::STrack::setEkfConfig(const CameraParams& cam, float expected_size_m)
+{
+    cam_config_      = cam;
+    expected_size_m_ = expected_size_m;
+}
+
 void byte_track::STrack::activate(const size_t& frame_id, const size_t& track_id,
                                   int64_t ts_ns, bool is_blob)
 {
-    kalman_filter_.initiate(mean_, covariance_, rect_.getXyah());
+    const auto xyah = rect_.getXyah();
+    stored_ar_ = xyah(2);
+
+    if (cam_config_.has_value())
+    {
+        kalman_filter_.initiate(mean_, covariance_, *cam_config_, xyah, expected_size_m_);
+    }
     updateRect();
     rect_measured_ = rect_;
     has_fresh_measurement_ = true;
@@ -152,20 +167,28 @@ void byte_track::STrack::reActivate(const STrack& new_track, const size_t& frame
 {
     rect_measured_ = new_track.getRect();
     has_fresh_measurement_ = true;
-    if (is_blob_track_ && !new_track.isBlobTrack() && consecutive_yolo_hits_ == 0)
+
+    const auto xyah = new_track.getRect().getXyah();
+    stored_ar_ = xyah(2);
+
+    if (cam_config_.has_value())
     {
-        // First YOLO match on a blob-seeded track: Kalman scale (ar, h) is stuck at blob
-        // dimensions and converges very slowly. Re-initiate from the YOLO measurement,
-        // preserving position velocity so prediction remains useful.
-        const float vx = mean_[4];
-        const float vy = mean_[5];
-        kalman_filter_.initiate(mean_, covariance_, new_track.getRect().getXyah());
-        mean_[4] = vx;
-        mean_[5] = vy;
-    }
-    else
-    {
-        kalman_filter_.update(mean_, covariance_, new_track.getRect().getXyah());
+        if (is_blob_track_ && !new_track.isBlobTrack() && consecutive_yolo_hits_ == 0)
+        {
+            // First YOLO match on a blob-seeded track: re-initiate from YOLO measurement,
+            // preserving 3D velocity so prediction remains useful.
+            const float vx = mean_(3);
+            const float vy = mean_(4);
+            const float vz = mean_(5);
+            kalman_filter_.initiate(mean_, covariance_, *cam_config_, xyah, expected_size_m_);
+            mean_(3) = vx;
+            mean_(4) = vy;
+            mean_(5) = vz;
+        }
+        else
+        {
+            kalman_filter_.update(mean_, covariance_, *cam_config_, xyah);
+        }
     }
     updateRect();
 
@@ -194,14 +217,13 @@ void byte_track::STrack::reActivate(const STrack& new_track, const size_t& frame
     else
     {
         consecutive_yolo_hits_ = 0;
-        // A blob matched a YOLO-originated track. The blob position is too noisy to trust
-        // for velocity estimation; carrying stale velocity forward causes the Kalman to predict
-        // far from where the target actually reappears. Reset velocity so the next prediction
+        // A blob matched a YOLO-originated track. Reset velocity so the next prediction
         // stays at the current filtered position rather than overshooting.
         if (!is_blob_track_)
         {
-            mean_[4] = 0.0f;
-            mean_[5] = 0.0f;
+            mean_(3) = 0.0f;
+            mean_(4) = 0.0f;
+            mean_(5) = 0.0f;
         }
     }
     blob_hits_++;
@@ -220,10 +242,6 @@ void byte_track::STrack::predict(int64_t current_ts_ns)
     }
 
     has_fresh_measurement_ = false;
-    if (state_ != STrackState::Tracked)
-    {
-        mean_[7] = 0;
-    }
     kalman_filter_.predict(mean_, covariance_, dt);
 }
 
@@ -232,20 +250,28 @@ void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id,
 {
     rect_measured_ = new_track.getRect();
     has_fresh_measurement_ = true;
-    if (is_blob_track_ && !new_track.isBlobTrack() && consecutive_yolo_hits_ == 0)
+
+    const auto xyah = new_track.getRect().getXyah();
+    stored_ar_ = xyah(2);
+
+    if (cam_config_.has_value())
     {
-        // First YOLO match on a blob-seeded track: Kalman scale (ar, h) is stuck at blob
-        // dimensions and converges very slowly. Re-initiate from the YOLO measurement,
-        // preserving position velocity so prediction remains useful.
-        const float vx = mean_[4];
-        const float vy = mean_[5];
-        kalman_filter_.initiate(mean_, covariance_, new_track.getRect().getXyah());
-        mean_[4] = vx;
-        mean_[5] = vy;
-    }
-    else
-    {
-        kalman_filter_.update(mean_, covariance_, new_track.getRect().getXyah());
+        if (is_blob_track_ && !new_track.isBlobTrack() && consecutive_yolo_hits_ == 0)
+        {
+            // First YOLO match on a blob-seeded track: re-initiate from YOLO measurement,
+            // preserving 3D velocity so prediction remains useful.
+            const float vx = mean_(3);
+            const float vy = mean_(4);
+            const float vz = mean_(5);
+            kalman_filter_.initiate(mean_, covariance_, *cam_config_, xyah, expected_size_m_);
+            mean_(3) = vx;
+            mean_(4) = vy;
+            mean_(5) = vz;
+        }
+        else
+        {
+            kalman_filter_.update(mean_, covariance_, *cam_config_, xyah);
+        }
     }
     updateRect();
 
@@ -270,12 +296,12 @@ void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id,
     else
     {
         consecutive_yolo_hits_ = 0;
-        // Same rationale as reActivate: reset velocity when a blob matches a YOLO track
-        // to prevent stale blob-derived velocity from overshooting the next prediction.
+        // Same rationale as reActivate: reset velocity when a blob matches a YOLO track.
         if (!is_blob_track_)
         {
-            mean_[4] = 0.0f;
-            mean_[5] = 0.0f;
+            mean_(3) = 0.0f;
+            mean_(4) = 0.0f;
+            mean_(5) = 0.0f;
         }
     }
     blob_hits_++;
@@ -302,28 +328,48 @@ void byte_track::STrack::markAsRemoved()
 
 void byte_track::STrack::updateRect()
 {
-    rect_.width() = mean_[2] * mean_[3];
-    rect_.height() = mean_[3];
-    rect_.x() = mean_[0] - rect_.width() / 2;
-    rect_.y() = mean_[1] - rect_.height() / 2;
+    if (!cam_config_.has_value())
+    {
+        return;
+    }
+
+    const auto& cam = *cam_config_;
+    const float X   = mean_(0);
+    const float Y   = mean_(1);
+    const float Z   = mean_(2);
+    const float s   = mean_(6);
+
+    if (Z <= 0.0f) { return; }
+
+    const float cx_px = cam.fx * X / Z + cam.cx;
+    const float cy_px = cam.fy * Y / Z + cam.cy;
+    const float h_px  = cam.fy * s / Z;
+    const float w_px  = stored_ar_ * h_px;
+
+    rect_.x()      = cx_px - w_px * 0.5f;
+    rect_.y()      = cy_px - h_px * 0.5f;
+    rect_.width()  = w_px;
+    rect_.height() = h_px;
 }
 
 void byte_track::STrack::applyEgoMotionCorrection(
-    const Eigen::Matrix3f& R_delta, float fx, float fy, float cx, float cy)
+    const Eigen::Matrix3f& R_delta, float /*fx*/, float /*fy*/, float /*cx*/, float /*cy*/)
 {
-    // Use the Kalman predicted center (mean_[0], mean_[1]) directly — rect_ may be
-    // stale if predict() was called without a subsequent updateRect().
-    const float u = mean_[0];
-    const float v = mean_[1];
+    if (!cam_config_.has_value()) { return; }
 
-    // Unproject pixel center to a unit-depth bearing ray in the previous camera frame.
-    const Eigen::Vector3f ray((u - cx) / fx, (v - cy) / fy, 1.f);
+    // Rotate position and velocity directly in 3D camera frame.
+    const Eigen::Vector3f pos(mean_(0), mean_(1), mean_(2));
+    const Eigen::Vector3f vel(mean_(3), mean_(4), mean_(5));
 
-    // Rotate into the current camera frame (depth-independent for pure rotation).
-    const Eigen::Vector3f ray_new = R_delta * ray;
+    const Eigen::Vector3f pos_new = R_delta * pos;
+    const Eigen::Vector3f vel_new = R_delta * vel;
 
-    // Reproject to pixel coordinates and update the Kalman state.
-    mean_[0] = fx * ray_new.x() / ray_new.z() + cx;
-    mean_[1] = fy * ray_new.y() / ray_new.z() + cy;
+    mean_(0) = pos_new.x();
+    mean_(1) = pos_new.y();
+    mean_(2) = pos_new.z();
+    mean_(3) = vel_new.x();
+    mean_(4) = vel_new.y();
+    mean_(5) = vel_new.z();
+
     updateRect();
 }
