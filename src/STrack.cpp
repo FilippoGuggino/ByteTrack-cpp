@@ -194,6 +194,15 @@ void byte_track::STrack::reActivate(const STrack& new_track, const size_t& frame
     else
     {
         consecutive_yolo_hits_ = 0;
+        // A blob matched a YOLO-originated track. The blob position is too noisy to trust
+        // for velocity estimation; carrying stale velocity forward causes the Kalman to predict
+        // far from where the target actually reappears. Reset velocity so the next prediction
+        // stays at the current filtered position rather than overshooting.
+        if (!is_blob_track_)
+        {
+            mean_[4] = 0.0f;
+            mean_[5] = 0.0f;
+        }
     }
     blob_hits_++;
     last_ts_ns_ = ts_ns;
@@ -261,6 +270,13 @@ void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id,
     else
     {
         consecutive_yolo_hits_ = 0;
+        // Same rationale as reActivate: reset velocity when a blob matches a YOLO track
+        // to prevent stale blob-derived velocity from overshooting the next prediction.
+        if (!is_blob_track_)
+        {
+            mean_[4] = 0.0f;
+            mean_[5] = 0.0f;
+        }
     }
     blob_hits_++;
     last_ts_ns_ = ts_ns;
