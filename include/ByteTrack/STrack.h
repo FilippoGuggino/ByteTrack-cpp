@@ -66,6 +66,12 @@ public:
     void applyEgoMotionCorrection(const Eigen::Matrix3f& R_delta,
                                   float fx, float fy, float cx, float cy);
 
+    // Kalman-predicted center in pixel coordinates (mean[0], mean[1]).
+    float getKalmanCx() const;
+    float getKalmanCy() const;
+    // 1-sigma position uncertainty radius: sqrt(P[0,0] + P[1,1]).
+    float getKalmanSigmaRadius() const;
+
 private:
     KalmanFilter kalman_filter_;
     KalmanFilter::StateMean mean_;

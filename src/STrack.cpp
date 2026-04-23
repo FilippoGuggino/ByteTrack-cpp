@@ -1,6 +1,7 @@
 #include "ByteTrack/STrack.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -306,6 +307,21 @@ void byte_track::STrack::updateRect()
     rect_.height() = mean_[3];
     rect_.x() = mean_[0] - rect_.width() / 2;
     rect_.y() = mean_[1] - rect_.height() / 2;
+}
+
+float byte_track::STrack::getKalmanCx() const
+{
+    return mean_[0];
+}
+
+float byte_track::STrack::getKalmanCy() const
+{
+    return mean_[1];
+}
+
+float byte_track::STrack::getKalmanSigmaRadius() const
+{
+    return std::sqrt(covariance_(0, 0) + covariance_(1, 1));
 }
 
 void byte_track::STrack::applyEgoMotionCorrection(
