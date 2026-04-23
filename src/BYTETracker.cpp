@@ -695,7 +695,7 @@ std::vector<std::vector<float>> byte_track::BYTETracker::calcMatchingDistance(
                 // size so that a fast-approaching target (large bbox, large inter-frame
                 // shift) can still be matched when IoU collapses to zero.
                 const float avg_dim_sum = ra.width() + rb.width() + ra.height() + rb.height();
-                const float scale = std::max(config_.blob_match_max_dist_px, 0.5f * avg_dim_sum);
+                const float scale = std::max(config_.blob_match_max_dist_px, 1.5f * avg_dim_sum);
                 const float centroid_d = std::min(1.0f, d / scale);
                 const float iou_d = 1.0f - ra.calcIoU(rb);
                 dist[i][j] = std::min(centroid_d, iou_d);
