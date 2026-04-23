@@ -59,6 +59,19 @@ struct BYTETrackerConfig
     // Consecutive YOLO hits required before a blob-originated track switches from centroid-distance
     // matching to IoU matching. Keeps centroid distance while the Kalman box converges to YOLO size.
     int blob_to_yolo_transition_hits = 3;
+
+    // Kalman filter noise weights for YOLO-seeded tracks.
+    // Process/measurement noise scales as weight * bbox_height, so these values are calibrated
+    // for typical YOLO box heights (50–200 px).
+    float kalman_std_weight_position = 1.f / 20;
+    float kalman_std_weight_velocity = 1.f / 160;
+
+    // Kalman filter noise weights for blob-seeded tracks.
+    // Blobs have a tiny bounding box (height ≈ 2–4 px), so the height-based scaling collapses
+    // position uncertainty to sub-pixel values with the YOLO weights. Use much larger weights
+    // here to keep uncertainty at a physically meaningful scale (O(10) px).
+    float blob_kalman_std_weight_position = 2.0f;
+    float blob_kalman_std_weight_velocity = 0.5f;
 };
 
 class BYTETracker

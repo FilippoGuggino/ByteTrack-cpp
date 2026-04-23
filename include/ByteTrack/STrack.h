@@ -19,7 +19,8 @@ enum class STrackState {
 class STrack
 {
 public:
-    STrack(const Rect<float>& rect, const float& score, bool is_blob = false, int label = -1);
+    STrack(const Rect<float>& rect, const float& score, bool is_blob = false, int label = -1,
+           float kf_std_weight_position = 1.f / 20, float kf_std_weight_velocity = 1.f / 160);
     ~STrack();
 
     const Rect<float>& getRect() const;

@@ -80,7 +80,9 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
     std::vector<STrackPtr> det_low_stracks;
     for (const auto& object : objects)
     {
-        const auto strack = std::make_shared<STrack>(object.rect, object.prob, /*is_blob=*/false, object.label);
+        const auto strack = std::make_shared<STrack>(object.rect, object.prob, /*is_blob=*/false, object.label,
+                                                    config_.kalman_std_weight_position,
+                                                    config_.kalman_std_weight_velocity);
         if (object.prob >= config_.track_thresh)
         {
             det_stracks.push_back(strack);
@@ -98,7 +100,9 @@ byte_track::BYTETracker::update(const std::vector<Object>& objects,
         const Rect<float> rect(blob.x - r, blob.y - r, 2.0f * r, 2.0f * r);
         // Clamp response to [0,1] to use as confidence
         const float conf = std::min(1.0f, std::max(0.0f, blob.response));
-        const auto strack = std::make_shared<STrack>(rect, conf, /*is_blob=*/true, blob.label);
+        const auto strack = std::make_shared<STrack>(rect, conf, /*is_blob=*/true, blob.label,
+                                                    config_.blob_kalman_std_weight_position,
+                                                    config_.blob_kalman_std_weight_velocity);
 
         // Suppress blob if its center falls inside any YOLO detection bbox from this frame.
         // det_stracks holds only this frame's YOLO STracks at this point; iterating it

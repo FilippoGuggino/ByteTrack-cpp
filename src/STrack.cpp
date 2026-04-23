@@ -5,8 +5,9 @@
 #include <cstddef>
 #include <cstdint>
 
-byte_track::STrack::STrack(const Rect<float>& rect, const float& score, bool is_blob, int label) :
-    kalman_filter_(),
+byte_track::STrack::STrack(const Rect<float>& rect, const float& score, bool is_blob, int label,
+                           float kf_std_weight_position, float kf_std_weight_velocity) :
+    kalman_filter_(kf_std_weight_position, kf_std_weight_velocity),
     mean_(),
     covariance_(),
     rect_(rect),
