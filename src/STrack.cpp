@@ -9,6 +9,8 @@ byte_track::STrack::STrack(const Rect<float>& rect, const float& score, bool is_
     mean_(),
     covariance_(),
     rect_(rect),
+    rect_measured_(rect),
+    has_fresh_measurement_(false),
     state_(STrackState::New),
     is_activated_(false),
     score_(score),
@@ -34,6 +36,16 @@ byte_track::STrack::~STrack()
 const byte_track::Rect<float>& byte_track::STrack::getRect() const
 {
     return rect_;
+}
+
+const byte_track::Rect<float>& byte_track::STrack::getMeasuredRect() const
+{
+    return rect_measured_;
+}
+
+bool byte_track::STrack::hasFreshMeasurement() const
+{
+    return has_fresh_measurement_;
 }
 
 const byte_track::STrackState& byte_track::STrack::getSTrackState() const
@@ -116,6 +128,8 @@ void byte_track::STrack::activate(const size_t& frame_id, const size_t& track_id
 {
     kalman_filter_.initiate(mean_, covariance_, rect_.getXyah());
     updateRect();
+    rect_measured_ = rect_;
+    has_fresh_measurement_ = true;
 
     state_ = STrackState::New;
     is_activated_ = false;
@@ -136,6 +150,8 @@ void byte_track::STrack::reActivate(const STrack& new_track, const size_t& frame
                                     int64_t ts_ns, const int& new_track_id,
                                     size_t blob_to_yolo_transition_hits)
 {
+    rect_measured_ = new_track.getRect();
+    has_fresh_measurement_ = true;
     if (is_blob_track_ && !new_track.isBlobTrack() && consecutive_yolo_hits_ == 0)
     {
         // First YOLO match on a blob-seeded track: Kalman scale (ar, h) is stuck at blob
@@ -194,6 +210,7 @@ void byte_track::STrack::predict(int64_t current_ts_ns)
         dt = std::clamp(dt, 0.001f, 10.0f);
     }
 
+    has_fresh_measurement_ = false;
     if (state_ != STrackState::Tracked)
     {
         mean_[7] = 0;
@@ -204,6 +221,8 @@ void byte_track::STrack::predict(int64_t current_ts_ns)
 void byte_track::STrack::update(const STrack& new_track, const size_t& frame_id, int64_t ts_ns,
                                 size_t blob_to_yolo_transition_hits)
 {
+    rect_measured_ = new_track.getRect();
+    has_fresh_measurement_ = true;
     if (is_blob_track_ && !new_track.isBlobTrack() && consecutive_yolo_hits_ == 0)
     {
         // First YOLO match on a blob-seeded track: Kalman scale (ar, h) is stuck at blob

@@ -23,6 +23,8 @@ public:
     ~STrack();
 
     const Rect<float>& getRect() const;
+    const Rect<float>& getMeasuredRect() const;
+    bool hasFreshMeasurement() const;
     const STrackState& getSTrackState() const;
 
     const bool& isActivated() const;
@@ -70,6 +72,8 @@ private:
     KalmanFilter::StateCov covariance_;
 
     Rect<float> rect_;
+    Rect<float> rect_measured_;
+    bool has_fresh_measurement_;
     STrackState state_;
 
     bool is_activated_;
